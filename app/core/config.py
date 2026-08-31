@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     environment: str = "development"
 
     secret_key: str
-    access_token_expire_minutes: int = 1440
+    access_token_expire_minutes: int = 10080
 
     database_url: str = "sqlite+aiosqlite:///./tradepilot.db"
 
