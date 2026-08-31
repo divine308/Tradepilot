@@ -139,57 +139,18 @@ app = FastAPI(
 # CORS
 # ============================================================
 
-# Production frontend
-PRODUCTION_FRONTEND = (
-    "https://tradepilot-ai-dun.vercel.app"
-)
-
-# Local Vite development
-LOCAL_FRONTEND = (
-    "http://localhost:5173"
-)
-
-# Build allowed origins
-allowed_origins = [
-    PRODUCTION_FRONTEND,
-    LOCAL_FRONTEND,
-]
-
-# Also allow the configured frontend URL
-# if it is different and actually exists.
-configured_frontend = getattr(
-    settings,
-    "frontend_url",
-    None,
-)
-
-if configured_frontend:
-
-    configured_frontend = (
-        str(configured_frontend)
-        .strip()
-        .rstrip("/")
-    )
-
-    if (
-        configured_frontend
-        and configured_frontend
-        not in allowed_origins
-    ):
-
-        allowed_origins.append(
-            configured_frontend
-        )
-
-
 app.add_middleware(
     CORSMiddleware,
+
     allow_origins=[
         "https://tradepilot-ai-dun.vercel.app",
         "http://localhost:5173",
     ],
+
     allow_credentials=True,
+
     allow_methods=["*"],
+
     allow_headers=["*"],
 )
 
