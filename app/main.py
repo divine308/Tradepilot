@@ -1,3 +1,4 @@
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -24,18 +25,22 @@ from app.routers import (
 )
 
 
+# ============================================================
+# APPLICATION LIFESPAN
+# ============================================================
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
-    # ============================================================
+    # ========================================================
     # DATABASE
-    # ============================================================
+    # ========================================================
 
     await init_db()
 
-    # ============================================================
+    # ========================================================
     # RESTORE AUTONOMOUS AGENT STATE
-    # ============================================================
+    # ========================================================
 
     try:
 
@@ -51,9 +56,9 @@ async def lifespan(app: FastAPI):
 
             enabled = result.scalar_one_or_none()
 
-        # --------------------------------------------------------
-        # Resume agent if it was ON before backend restart
-        # --------------------------------------------------------
+        # ----------------------------------------------------
+        # RESTORE AGENT
+        # ----------------------------------------------------
 
         if enabled:
 
@@ -61,6 +66,10 @@ async def lifespan(app: FastAPI):
 
                 await autonomous_agent.start(
                     persist=False
+                )
+
+                print(
+                    "Autonomous agent restored and started."
                 )
 
             else:
@@ -84,27 +93,15 @@ async def lifespan(app: FastAPI):
             error,
         )
 
-    # ============================================================
+    # ========================================================
     # APPLICATION RUNNING
-    # ============================================================
+    # ========================================================
 
     yield
 
-    # ============================================================
+    # ========================================================
     # APPLICATION SHUTDOWN
-    # ============================================================
-
-    # IMPORTANT:
-    #
-    # We intentionally DO NOT change the persistent
-    # enabled state here.
-    #
-    # If the agent was ON before a restart, the database
-    # remains ON and the lifespan startup code above
-    # will restore it.
-    #
-    # We only cancel the in-memory asyncio task because
-    # the Python process is shutting down anyway.
+    # ========================================================
 
     if autonomous_agent.task:
 
@@ -116,12 +113,16 @@ async def lifespan(app: FastAPI):
 
             await autonomous_agent.task
 
-        except Exception:
+        except BaseException:
 
             pass
 
         autonomous_agent.task = None
 
+
+# ============================================================
+# FASTAPI APPLICATION
+# ============================================================
 
 app = FastAPI(
     title=settings.app_name,
@@ -134,13 +135,62 @@ app = FastAPI(
 )
 
 
+# ============================================================
+# CORS
+# ============================================================
+
+# Production frontend
+PRODUCTION_FRONTEND = (
+    "https://tradepilot-ai-dun.vercel.app"
+)
+
+# Local Vite development
+LOCAL_FRONTEND = (
+    "http://localhost:5173"
+)
+
+# Build allowed origins
+allowed_origins = [
+    PRODUCTION_FRONTEND,
+    LOCAL_FRONTEND,
+]
+
+# Also allow the configured frontend URL
+# if it is different and actually exists.
+configured_frontend = getattr(
+    settings,
+    "frontend_url",
+    None,
+)
+
+if configured_frontend:
+
+    configured_frontend = (
+        str(configured_frontend)
+        .strip()
+        .rstrip("/")
+    )
+
+    if (
+        configured_frontend
+        and configured_frontend
+        not in allowed_origins
+    ):
+
+        allowed_origins.append(
+            configured_frontend
+        )
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        settings.frontend_url
-    ],
+
+    allow_origins=allowed_origins,
+
     allow_credentials=True,
+
     allow_methods=["*"],
+
     allow_headers=["*"],
 )
 
@@ -149,11 +199,25 @@ app.add_middleware(
 # API ROUTERS
 # ============================================================
 
-app.include_router(auth.router)
-app.include_router(api_keys.router)
-app.include_router(trading.router)
-app.include_router(dashboard.router)
-app.include_router(market.router)
+app.include_router(
+    auth.router
+)
+
+app.include_router(
+    api_keys.router
+)
+
+app.include_router(
+    trading.router
+)
+
+app.include_router(
+    dashboard.router
+)
+
+app.include_router(
+    market.router
+)
 
 
 # ============================================================
@@ -181,3 +245,4 @@ async def health():
     return {
         "status": "healthy"
     }
+
