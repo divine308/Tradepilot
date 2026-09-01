@@ -357,3 +357,57 @@ async def cancel_orders(
             status_code=500,
             detail=f"Unable to cancel orders: {error}",
         )
+
+ # ============================================================
+# CLOSE ALL POSITIONS
+# ============================================================
+
+@router.post("/positions/close-all")
+async def close_all_positions(
+    current_user=Depends(get_current_user),
+):
+
+    try:
+
+        result = alpaca_service.close_all_positions()
+
+        if result["closed"]:
+
+            return {
+                "success": True,
+                "message": (
+                    "All open positions have been closed."
+                ),
+                "count": result["count"],
+            }
+
+        return {
+            "success": False,
+            "message": (
+                "Close orders were submitted, "
+                "but some positions are still open."
+            ),
+            "count": result["count"],
+            "remaining_positions": result["remaining"],
+        }
+
+    except Exception as error:
+
+        print(
+            "===================================================="
+        )
+        print("CLOSE ALL POSITIONS ERROR")
+        print(
+            "===================================================="
+        )
+        print(repr(error))
+        print(
+            "===================================================="
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Unable to close all positions: {error}"
+            ),
+        )
