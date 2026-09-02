@@ -48,14 +48,14 @@ class AutonomousTradingAgent:
     # Position protection
     # ------------------------------------------------------------
 
-    STOP_LOSS_PERCENT = 0.02
-    TAKE_PROFIT_PERCENT = 0.04
+    STOP_LOSS_PERCENT = 0.04
+    TAKE_PROFIT_PERCENT = 0.30
 
     # ------------------------------------------------------------
     # Breakeven
     # ------------------------------------------------------------
 
-    BREAKEVEN_TRIGGER_PERCENT = 0.02
+    BREAKEVEN_TRIGGER_PERCENT = 0.10
     BREAKEVEN_OFFSET_PERCENT = 0.0005
 
     # ------------------------------------------------------------
