@@ -1,3 +1,4 @@
+
 import asyncio
 
 from datetime import datetime, timezone
@@ -38,48 +39,50 @@ class AutonomousTradingAgent:
         "TSLA",
     ]
 
-    # Scan every 5 minutes
     SCAN_INTERVAL_SECONDS = 300
 
-    # Maximum value of a NEW position
     MAX_TRADE_PERCENT = 0.05
 
-    # Maximum combined portfolio exposure
     MAX_TOTAL_EXPOSURE_PERCENT = 0.50
 
-    # ------------------------------------------------------------
-    # Position protection
-    # ------------------------------------------------------------
+    # ============================================================
+    # POSITION PROTECTION
+    # ============================================================
 
     STOP_LOSS_PERCENT = 0.04
     TAKE_PROFIT_PERCENT = 0.30
 
-    # ------------------------------------------------------------
-    # Breakeven
-    # ------------------------------------------------------------
+    # ============================================================
+    # BREAKEVEN
+    # ============================================================
 
     BREAKEVEN_TRIGGER_PERCENT = 0.10
-
-    # Lock +0.5% above entry
     BREAKEVEN_OFFSET_PERCENT = 0.005
 
-    # ------------------------------------------------------------
-    # Execution limits
-    # ------------------------------------------------------------
+    # ============================================================
+    # EXECUTION LIMITS
+    # ============================================================
 
     MAX_TRADES_PER_SCAN = 1
     MAX_SESSION_TRADES = 10
 
-    # ------------------------------------------------------------
-    # Fill handling
-    # ------------------------------------------------------------
+    # ============================================================
+    # FILL HANDLING
+    # ============================================================
 
     FILL_TIMEOUT_SECONDS = 15
     FILL_POLL_INTERVAL_SECONDS = 0.5
 
-    # ------------------------------------------------------------
-    # Minimum quantity
-    # ------------------------------------------------------------
+    # ============================================================
+    # ORDER CANCELLATION
+    # ============================================================
+
+    CANCEL_TIMEOUT_SECONDS = 10
+    CANCEL_POLL_INTERVAL_SECONDS = 0.5
+
+    # ============================================================
+    # MINIMUM QUANTITY
+    # ============================================================
 
     MIN_QUANTITY = 0.000001
 
@@ -146,9 +149,7 @@ class AutonomousTradingAgent:
                 )
             )
 
-            state = (
-                result.scalar_one_or_none()
-            )
+            state = result.scalar_one_or_none()
 
             if state is None:
 
@@ -490,9 +491,229 @@ class AutonomousTradingAgent:
                 continue
 
         return (
-            total_market_value /
-            equity
+            total_market_value
+            / equity
         )
+
+    # ============================================================
+    # WAIT FOR ORDER CANCELLATION
+    # ============================================================
+
+    async def _wait_for_order_cancellation(
+        self,
+        order_id,
+    ):
+
+        deadline = (
+            asyncio.get_running_loop().time()
+            + self.CANCEL_TIMEOUT_SECONDS
+        )
+
+        last_order = None
+
+        while (
+            asyncio.get_running_loop().time()
+            < deadline
+        ):
+
+            try:
+
+                order = await asyncio.to_thread(
+                    alpaca_service.client.get_order_by_id,
+                    order_id,
+                )
+
+                last_order = order
+
+                status = str(
+                    order.status
+                ).lower()
+
+                if status in {
+                    "canceled",
+                    "cancelled",
+                    "rejected",
+                    "expired",
+                }:
+
+                    return True
+
+                if status == "filled":
+
+                    return False
+
+            except Exception:
+
+                pass
+
+            await asyncio.sleep(
+                self.CANCEL_POLL_INTERVAL_SECONDS
+            )
+
+        # Final verification
+
+        try:
+
+            order = await asyncio.to_thread(
+                alpaca_service.client.get_order_by_id,
+                order_id,
+            )
+
+            last_order = order
+
+            status = str(
+                order.status
+            ).lower()
+
+            return status in {
+                "canceled",
+                "cancelled",
+                "rejected",
+                "expired",
+            }
+
+        except Exception:
+
+            return False
+
+    # ============================================================
+    # CANCEL PROTECTIVE STOP SAFELY
+    # ============================================================
+
+    async def _cancel_protective_stop_safely(
+        self,
+        symbol: str,
+    ):
+
+        symbol = symbol.upper().strip()
+
+        stop_order = (
+            await asyncio.to_thread(
+                alpaca_service.get_active_protective_stop,
+                symbol,
+            )
+        )
+
+        if stop_order is None:
+
+            self.protected_symbols.discard(
+                symbol
+            )
+
+            return True
+
+        order_id = str(
+            stop_order.id
+        )
+
+        self.log(
+            agent="Risk Agent",
+            action=(
+                "Cancelling protective stop "
+                "before position exit"
+            ),
+            symbol=symbol,
+            details={
+                "order_id": order_id,
+            },
+        )
+
+        try:
+
+            await asyncio.to_thread(
+                alpaca_service.client.cancel_order_by_id,
+                stop_order.id,
+            )
+
+        except Exception as error:
+
+            # The order may have already been cancelled
+            # between lookup and cancellation.
+
+            try:
+
+                current_order = (
+                    await asyncio.to_thread(
+                        alpaca_service.client.get_order_by_id,
+                        stop_order.id,
+                    )
+                )
+
+                current_status = str(
+                    current_order.status
+                ).lower()
+
+                if current_status not in {
+                    "canceled",
+                    "cancelled",
+                    "rejected",
+                    "expired",
+                }:
+
+                    raise error
+
+            except Exception:
+
+                self.log(
+                    agent="Risk Agent",
+                    action=(
+                        "Protective stop cancellation failed"
+                    ),
+                    symbol=symbol,
+                    status="error",
+                    details=str(error),
+                )
+
+                return False
+
+        # ========================================================
+        # IMPORTANT:
+        #
+        # Alpaca cancellation is not necessarily instantaneous.
+        # We MUST wait until the order is actually cancelled before
+        # attempting the market sell.
+        # ========================================================
+
+        cancelled = (
+            await self._wait_for_order_cancellation(
+                stop_order.id
+            )
+        )
+
+        if not cancelled:
+
+            self.log(
+                agent="Risk Agent",
+                action=(
+                    "Protective stop is not confirmed "
+                    "cancelled — exit blocked"
+                ),
+                symbol=symbol,
+                status="error",
+                details={
+                    "order_id": order_id,
+                },
+            )
+
+            return False
+
+        self.protected_symbols.discard(
+            symbol
+        )
+
+        self.log(
+            agent="Risk Agent",
+            action=(
+                "Protective stop fully cancelled"
+            ),
+            symbol=symbol,
+            status="success",
+            details={
+                "order_id": order_id,
+            },
+        )
+
+        return True
 
     # ============================================================
     # POSITION PROTECTION
@@ -507,12 +728,10 @@ class AutonomousTradingAgent:
         try:
 
             positions = (
-                alpaca_service.get_positions()
+                await asyncio.to_thread(
+                    alpaca_service.get_positions
+                )
             )
-
-            # ----------------------------------------------------
-            # No positions
-            # ----------------------------------------------------
 
             if not positions:
 
@@ -576,17 +795,33 @@ class AutonomousTradingAgent:
                     continue
 
                 # =================================================
-                # PROTECTION RECOVERY
-                #
-                # If the agent restarted and forgot local state,
-                # make sure the existing position still has a
-                # protective stop.
+                # EXIT ALREADY IN PROGRESS
                 # =================================================
 
-                if (
-                    symbol
-                    not in self.protected_symbols
-                ):
+                if symbol in self.exit_in_progress:
+
+                    continue
+
+                # =================================================
+                # FIND REAL PROTECTIVE STOP
+                # =================================================
+
+                existing_stop = await asyncio.to_thread(
+                    alpaca_service.get_active_protective_stop,
+                    symbol,
+                )
+
+                if existing_stop is not None:
+
+                    self.protected_symbols.add(
+                        symbol
+                    )
+
+                # =================================================
+                # PROTECTION RECOVERY
+                # =================================================
+
+                if existing_stop is None:
 
                     self.current_stage = (
                         "RECOVERING_PROTECTION"
@@ -595,89 +830,25 @@ class AutonomousTradingAgent:
                     self.log(
                         agent="Risk Agent",
                         action=(
-                            "Checking protection "
-                            "for existing position"
+                            "No active protective stop "
+                            "found — recovering protection"
                         ),
                         symbol=symbol,
                     )
 
-                    try:
-
-                        stop_order = (
-                            await asyncio.to_thread(
-                                alpaca_service
-                                .submit_protective_stop,
-                                symbol,
-                                round(
-                                    position_qty,
-                                    9,
-                                ),
-                                round(
-                                    entry_price
-                                    * (
-                                        1
-                                        - self.STOP_LOSS_PERCENT
-                                    ),
-                                    2,
-                                ),
-                            )
-                        )
-
-                        if stop_order is not None:
-
-                            self.protected_symbols.add(
-                                symbol
-                            )
-
-                            self.log(
-                                agent="Risk Agent",
-                                action=(
-                                    "Protective stop "
-                                    "recovered"
-                                ),
-                                symbol=symbol,
-                                status="success",
-                                details={
-                                    "order_id": str(
-                                        stop_order.id
-                                    ),
-                                    "stop_price": (
-                                        entry_price
-                                        * (
-                                            1
-                                            - self.STOP_LOSS_PERCENT
-                                        )
-                                    ),
-                                    "quantity": (
-                                        position_qty
-                                    ),
-                                },
-                            )
-
-                    except Exception as error:
-
-                        self.last_error = str(error)
-
-                        self.log(
-                            agent="Risk Agent",
-                            action=(
-                                "Protective stop "
-                                "recovery failed"
-                            ),
+                    stop_order = (
+                        await self._ensure_position_protection(
                             symbol=symbol,
-                            status="error",
-                            details=str(error),
+                            quantity=position_qty,
+                            entry_price=entry_price,
                         )
+                    )
 
-                        # Do not automatically sell here.
-                        #
-                        # The existing position may already have
-                        # an active Alpaca stop. We only know that
-                        # local state does not know about it.
-                        #
-                        # The normal protection establishment path
-                        # remains responsible for creating a stop
-                        # if required.
+                    if stop_order is not None:
+
+                        self.protected_symbols.add(
+                            symbol
+                        )
 
                 # =================================================
                 # PROFIT
@@ -795,17 +966,13 @@ class AutonomousTradingAgent:
 
         try:
 
-            result = (
-                alpaca_service
-                .move_stop_to_breakeven(
-                    symbol=symbol,
-                    stop_price=(
-                        round(
-                            breakeven_price,
-                            2,
-                        )
-                    ),
-                )
+            result = await asyncio.to_thread(
+                alpaca_service.move_stop_to_breakeven,
+                symbol=symbol,
+                stop_price=round(
+                    breakeven_price,
+                    2,
+                ),
             )
 
             if result is None:
@@ -838,15 +1005,9 @@ class AutonomousTradingAgent:
                 symbol=symbol,
                 status="success",
                 details={
-                    "new_stop": (
-                        breakeven_price
-                    ),
-                    "current_price": (
-                        current_price
-                    ),
-                    "profit_percent": (
-                        profit_percent
-                    ),
+                    "new_stop": breakeven_price,
+                    "current_price": current_price,
+                    "profit_percent": profit_percent,
                 },
             )
 
@@ -879,7 +1040,7 @@ class AutonomousTradingAgent:
 
         if symbol in self.exit_in_progress:
 
-            return
+            return False
 
         self.exit_in_progress.add(
             symbol
@@ -889,123 +1050,39 @@ class AutonomousTradingAgent:
             "TAKE_PROFIT"
         )
 
-        self.log(
-            agent="Strategy Agent",
-            action=(
-                "Take-profit target reached"
-            ),
-            symbol=symbol,
-            details={
-                "entry_price": entry_price,
-                "current_price": current_price,
-                "profit_percent": profit_percent,
-                "target_percent": (
-                    self.TAKE_PROFIT_PERCENT
-                ),
-                "quantity": position_qty,
-            },
-        )
-
-        # ========================================================
-        # CANCEL PROTECTIVE STOP
-        # ========================================================
-
         try:
 
-            alpaca_service.cancel_protective_stop(
-                symbol
-            )
-
             self.log(
-                agent="Risk Agent",
+                agent="Strategy Agent",
                 action=(
-                    "Protective stop cancelled "
-                    "before take-profit exit"
+                    "Take-profit target reached"
                 ),
                 symbol=symbol,
-                status="success",
-            )
-
-        except Exception as error:
-
-            self.last_error = str(error)
-
-            self.log(
-                agent="Risk Agent",
-                action=(
-                    "Unable to cancel protective stop — "
-                    "take-profit exit blocked"
-                ),
-                symbol=symbol,
-                status="error",
-                details=str(error),
-            )
-
-            self.exit_in_progress.discard(
-                symbol
-            )
-
-            return
-
-        # ========================================================
-        # EXIT POSITION
-        # ========================================================
-
-        try:
-
-            exit_order = (
-                alpaca_service.submit_market_order(
-                    symbol=symbol,
-                    side="sell",
-                    quantity=round(
-                        position_qty,
-                        9,
-                    ),
-                )
-            )
-
-            self.log(
-                agent="Alpaca",
-                action=(
-                    "Take-profit market exit submitted"
-                ),
-                symbol=symbol,
-                status="success",
                 details={
-                    "order_id": str(
-                        exit_order.id
+                    "entry_price": entry_price,
+                    "current_price": current_price,
+                    "profit_percent": profit_percent,
+                    "target_percent": (
+                        self.TAKE_PROFIT_PERCENT
                     ),
                     "quantity": position_qty,
-                    "estimated_price": (
-                        current_price
-                    ),
-                    "profit_percent": (
-                        profit_percent
-                    ),
                 },
             )
 
-            self.breakeven_symbols.discard(
-                symbol
-            )
-
-            self.protected_symbols.discard(
-                symbol
-            )
-
-        except Exception as error:
-
-            self.last_error = str(error)
-
-            self.log(
-                agent="Alpaca",
-                action=(
-                    "Take-profit exit failed"
-                ),
+            success = await self._execute_sell(
                 symbol=symbol,
-                status="error",
-                details=str(error),
+                quantity=position_qty,
+                estimated_price=current_price,
+                estimated_value=(
+                    current_price
+                    * position_qty
+                ),
+                confidence=1.0,
+                risk_score=0.0,
+                reason="TAKE_PROFIT",
             )
+
+            return success
 
         finally:
 
@@ -1053,20 +1130,24 @@ class AutonomousTradingAgent:
 
         try:
 
-            stop_order = (
-                alpaca_service
-                .submit_protective_stop(
-                    symbol=symbol,
-                    quantity=round(
-                        quantity,
-                        9,
-                    ),
-                    stop_price=round(
-                        stop_price,
-                        2,
-                    ),
-                )
+            stop_order = await asyncio.to_thread(
+                alpaca_service.submit_protective_stop,
+                symbol=symbol,
+                quantity=round(
+                    quantity,
+                    9,
+                ),
+                stop_price=round(
+                    stop_price,
+                    2,
+                ),
             )
+
+            if stop_order is None:
+
+                raise RuntimeError(
+                    "Protective stop was not created."
+                )
 
             self.protected_symbols.add(
                 symbol
@@ -1136,16 +1217,69 @@ class AutonomousTradingAgent:
 
         try:
 
-            order = (
-                alpaca_service
-                .submit_market_order(
-                    symbol=symbol,
-                    side="sell",
-                    quantity=round(
-                        quantity,
-                        9,
-                    ),
+            # ----------------------------------------------------
+            # IMPORTANT:
+            #
+            # Emergency exit must also release any shares held
+            # by existing sell orders.
+            # ----------------------------------------------------
+
+            cancelled = (
+                await self._cancel_protective_stop_safely(
+                    symbol
                 )
+            )
+
+            if not cancelled:
+
+                self.log(
+                    agent="Risk Agent",
+                    action=(
+                        "Emergency exit blocked because "
+                        "protective stop could not be cancelled"
+                    ),
+                    symbol=symbol,
+                    status="error",
+                )
+
+                return None
+
+            available_qty = await asyncio.to_thread(
+                alpaca_service.get_available_sell_quantity,
+                symbol,
+            )
+
+            if available_qty <= 0:
+
+                self.log(
+                    agent="Risk Agent",
+                    action=(
+                        "Emergency exit has no available "
+                        "quantity"
+                    ),
+                    symbol=symbol,
+                    status="error",
+                )
+
+                return None
+
+            emergency_qty = min(
+                float(quantity),
+                float(available_qty),
+            )
+
+            if emergency_qty < self.MIN_QUANTITY:
+
+                return None
+
+            order = await asyncio.to_thread(
+                alpaca_service.submit_market_order,
+                symbol=symbol,
+                side="sell",
+                quantity=round(
+                    emergency_qty,
+                    9,
+                ),
             )
 
             self.log(
@@ -1159,7 +1293,7 @@ class AutonomousTradingAgent:
                     "order_id": str(
                         order.id
                     ),
-                    "quantity": quantity,
+                    "quantity": emergency_qty,
                     "reason": reason,
                 },
             )
@@ -1217,10 +1351,6 @@ class AutonomousTradingAgent:
         trades_this_scan = 0
 
         for symbol in self.WATCHLIST:
-
-            # ----------------------------------------------------
-            # Background scan cancellation
-            # ----------------------------------------------------
 
             if (
                 not self.running
@@ -1397,7 +1527,9 @@ class AutonomousTradingAgent:
             # ====================================================
 
             positions = (
-                alpaca_service.get_positions()
+                await asyncio.to_thread(
+                    alpaca_service.get_positions
+                )
             )
 
             existing_position = next(
@@ -1457,7 +1589,9 @@ class AutonomousTradingAgent:
             # ====================================================
 
             account = (
-                alpaca_service.get_account()
+                await asyncio.to_thread(
+                    alpaca_service.get_account
+                )
             )
 
             equity = float(
@@ -1533,7 +1667,6 @@ class AutonomousTradingAgent:
                 / price
             )
 
-            # Keep fractional quantity
             quantity = round(
                 quantity,
                 9,
@@ -1573,6 +1706,11 @@ class AutonomousTradingAgent:
                 position_qty = float(
                     existing_position.qty
                 )
+
+                # Do not use the full position blindly.
+                #
+                # The execution layer will re-check available
+                # quantity after the protective stop is cancelled.
 
                 quantity = min(
                     quantity,
@@ -1715,12 +1853,8 @@ class AutonomousTradingAgent:
                     "quantity": quantity,
                     "estimated_price": price,
                     "estimated_value": trade_value,
-                    "stop_loss": (
-                        stop_loss_price
-                    ),
-                    "take_profit": (
-                        take_profit_price
-                    ),
+                    "stop_loss": stop_loss_price,
+                    "take_profit": take_profit_price,
                     "breakeven_trigger": (
                         price
                         * (
@@ -1740,7 +1874,7 @@ class AutonomousTradingAgent:
             )
 
             # ====================================================
-            # BUY EXECUTION
+            # BUY
             # ====================================================
 
             if decision == "BUY":
@@ -1769,7 +1903,7 @@ class AutonomousTradingAgent:
                 break
 
             # ====================================================
-            # SELL EXECUTION
+            # SELL
             # ====================================================
 
             if decision == "SELL":
@@ -1782,6 +1916,7 @@ class AutonomousTradingAgent:
                         estimated_value=trade_value,
                         confidence=confidence,
                         risk_score=risk_score,
+                        reason="AI_SELL",
                     )
                 )
 
@@ -1846,15 +1981,14 @@ class AutonomousTradingAgent:
             # 1. MARKET ENTRY
             # ====================================================
 
-            order = (
-                alpaca_service.submit_market_order(
-                    symbol=symbol,
-                    side="buy",
-                    quantity=round(
-                        quantity,
-                        9,
-                    ),
-                )
+            order = await asyncio.to_thread(
+                alpaca_service.submit_market_order,
+                symbol=symbol,
+                side="buy",
+                quantity=round(
+                    quantity,
+                    9,
+                ),
             )
 
             self.log(
@@ -1879,18 +2013,20 @@ class AutonomousTradingAgent:
             )
 
             # ====================================================
-            # 2. WAIT FOR ACTUAL FILL
+            # 2. WAIT FOR FILL
             # ====================================================
 
             self.current_stage = (
                 "WAITING_FOR_FILL"
             )
 
-            filled_order = await asyncio.to_thread(
-                alpaca_service.wait_for_order_fill,
-                str(order.id),
-                self.FILL_TIMEOUT_SECONDS,
-                self.FILL_POLL_INTERVAL_SECONDS,
+            filled_order = (
+                await asyncio.to_thread(
+                    alpaca_service.wait_for_order_fill,
+                    str(order.id),
+                    self.FILL_TIMEOUT_SECONDS,
+                    self.FILL_POLL_INTERVAL_SECONDS,
+                )
             )
 
             if filled_order is None:
@@ -1909,9 +2045,31 @@ class AutonomousTradingAgent:
                         "order_id": str(
                             order.id
                         ),
-                        "timeout_seconds": (
-                            self.FILL_TIMEOUT_SECONDS
+                    },
+                )
+
+                return False
+
+            status = str(
+                filled_order.status
+            ).lower()
+
+            if status != "filled":
+
+                self.trades_rejected += 1
+
+                self.log(
+                    agent="Alpaca",
+                    action=(
+                        "BUY order did not fill"
+                    ),
+                    symbol=symbol,
+                    status="warning",
+                    details={
+                        "order_id": str(
+                            order.id
                         ),
+                        "status": status,
                     },
                 )
 
@@ -1933,7 +2091,7 @@ class AutonomousTradingAgent:
                 ValueError,
             ):
 
-                filled_qty = quantity
+                filled_qty = 0.0
 
             try:
 
@@ -1955,25 +2113,12 @@ class AutonomousTradingAgent:
 
                 self.trades_rejected += 1
 
-                self.log(
-                    agent="Alpaca",
-                    action=(
-                        "BUY filled with invalid quantity"
-                    ),
-                    symbol=symbol,
-                    status="error",
-                    details={
-                        "order_id": str(
-                            order.id
-                        ),
-                        "filled_qty": filled_qty,
-                    },
+                raise RuntimeError(
+                    "BUY filled with invalid quantity."
                 )
 
-                return False
-
             # ====================================================
-            # 4. RECALCULATE PROTECTION
+            # 4. ACTUAL PROTECTION
             # ====================================================
 
             actual_stop_price = (
@@ -2029,17 +2174,19 @@ class AutonomousTradingAgent:
                 "ESTABLISHING_PROTECTION"
             )
 
-            stop_order = await asyncio.to_thread(
-                alpaca_service.submit_protective_stop,
-                symbol,
-                round(
-                    filled_qty,
-                    9,
-                ),
-                round(
-                    actual_stop_price,
-                    2,
-                ),
+            stop_order = (
+                await asyncio.to_thread(
+                    alpaca_service.submit_protective_stop,
+                    symbol,
+                    round(
+                        filled_qty,
+                        9,
+                    ),
+                    round(
+                        actual_stop_price,
+                        2,
+                    ),
+                )
             )
 
             if stop_order is None:
@@ -2150,7 +2297,9 @@ class AutonomousTradingAgent:
             try:
 
                 positions = (
-                    alpaca_service.get_positions()
+                    await asyncio.to_thread(
+                        alpaca_service.get_positions
+                    )
                 )
 
                 position = next(
@@ -2216,55 +2365,212 @@ class AutonomousTradingAgent:
         estimated_value: float,
         confidence: float,
         risk_score: float,
+        reason: str = "AI_SELL",
     ):
+
+        symbol = symbol.upper().strip()
+
+        if symbol in self.exit_in_progress:
+
+            self.log(
+                agent="Supervisor",
+                action=(
+                    "SELL skipped — exit already "
+                    "in progress"
+                ),
+                symbol=symbol,
+                status="warning",
+            )
+
+            return False
+
+        self.exit_in_progress.add(
+            symbol
+        )
 
         try:
 
+            self.current_stage = (
+                "PREPARING_EXIT"
+            )
+
             # ====================================================
-            # CANCEL PROTECTIVE STOP FIRST
+            # 1. GET CURRENT POSITION
             # ====================================================
 
-            try:
+            position = await asyncio.to_thread(
+                alpaca_service.get_position,
+                symbol,
+            )
 
-                alpaca_service.cancel_protective_stop(
-                    symbol
-                )
+            if position is None:
 
                 self.log(
-                    agent="Risk Agent",
+                    agent="Supervisor",
                     action=(
-                        "Protective stop cancelled "
-                        "before SELL exit"
-                    ),
-                    symbol=symbol,
-                    status="success",
-                )
-
-            except Exception as error:
-
-                self.log(
-                    agent="Risk Agent",
-                    action=(
-                        "Unable to cancel protective stop"
+                        "SELL skipped — position "
+                        "no longer exists"
                     ),
                     symbol=symbol,
                     status="warning",
-                    details=str(error),
                 )
 
-            # ====================================================
-            # MARKET SELL
-            # ====================================================
+                return False
 
-            order = (
-                alpaca_service.submit_market_order(
-                    symbol=symbol,
-                    side="sell",
-                    quantity=round(
-                        quantity,
-                        9,
+            position_qty = float(
+                position.qty
+            )
+
+            if position_qty <= 0:
+
+                self.log(
+                    agent="Supervisor",
+                    action=(
+                        "SELL skipped — position quantity "
+                        "is zero"
                     ),
+                    symbol=symbol,
+                    status="warning",
                 )
+
+                return False
+
+            requested_quantity = min(
+                float(quantity),
+                position_qty,
+            )
+
+            requested_quantity = round(
+                requested_quantity,
+                9,
+            )
+
+            if requested_quantity < self.MIN_QUANTITY:
+
+                return False
+
+            # ====================================================
+            # 2. CANCEL PROTECTIVE STOP
+            # ====================================================
+
+            cancelled = (
+                await self._cancel_protective_stop_safely(
+                    symbol
+                )
+            )
+
+            if not cancelled:
+
+                self.log(
+                    agent="Risk Agent",
+                    action=(
+                        "SELL blocked — protective stop "
+                        "was not fully cancelled"
+                    ),
+                    symbol=symbol,
+                    status="error",
+                )
+
+                return False
+
+            # ====================================================
+            # 3. RE-CHECK AVAILABLE QUANTITY
+            # ====================================================
+
+            self.current_stage = (
+                "VERIFYING_AVAILABLE_QUANTITY"
+            )
+
+            available_qty = (
+                await asyncio.to_thread(
+                    alpaca_service.get_available_sell_quantity,
+                    symbol,
+                )
+            )
+
+            available_qty = round(
+                float(available_qty),
+                9,
+            )
+
+            if available_qty <= 0:
+
+                self.log(
+                    agent="Risk Agent",
+                    action=(
+                        "SELL blocked — no shares "
+                        "are currently available"
+                    ),
+                    symbol=symbol,
+                    status="error",
+                    details={
+                        "position_qty": position_qty,
+                        "available_qty": available_qty,
+                    },
+                )
+
+                return False
+
+            # Never send more than Alpaca says is available.
+
+            sell_quantity = min(
+                requested_quantity,
+                available_qty,
+            )
+
+            sell_quantity = round(
+                sell_quantity,
+                9,
+            )
+
+            if sell_quantity < self.MIN_QUANTITY:
+
+                self.log(
+                    agent="Risk Agent",
+                    action=(
+                        "SELL blocked — calculated "
+                        "available quantity is too small"
+                    ),
+                    symbol=symbol,
+                    status="warning",
+                    details={
+                        "requested": requested_quantity,
+                        "available": available_qty,
+                    },
+                )
+
+                return False
+
+            # ====================================================
+            # 4. MARKET SELL
+            # ====================================================
+
+            self.current_stage = (
+                "EXECUTING_EXIT"
+            )
+
+            self.log(
+                agent="Supervisor",
+                action=(
+                    "Submitting SELL after protective "
+                    "stop cancellation confirmed"
+                ),
+                symbol=symbol,
+                details={
+                    "reason": reason,
+                    "position_quantity": position_qty,
+                    "requested_quantity": requested_quantity,
+                    "available_quantity": available_qty,
+                    "sell_quantity": sell_quantity,
+                    "estimated_price": estimated_price,
+                },
+            )
+
+            order = await asyncio.to_thread(
+                alpaca_service.submit_market_order,
+                symbol=symbol,
+                side="sell",
+                quantity=sell_quantity,
             )
 
             self.log(
@@ -2278,17 +2584,224 @@ class AutonomousTradingAgent:
                     "order_id": str(
                         order.id
                     ),
-                    "quantity": quantity,
-                    "estimated_price": (
-                        estimated_price
-                    ),
+                    "quantity": sell_quantity,
+                    "estimated_price": estimated_price,
                     "estimated_value": (
-                        estimated_value
+                        estimated_price
+                        * sell_quantity
                     ),
                     "confidence": confidence,
                     "risk_score": risk_score,
+                    "reason": reason,
                 },
             )
+
+            # ====================================================
+            # 5. WAIT FOR FILL
+            # ====================================================
+
+            self.current_stage = (
+                "WAITING_FOR_SELL_FILL"
+            )
+
+            filled_order = (
+                await asyncio.to_thread(
+                    alpaca_service.wait_for_order_fill,
+                    str(order.id),
+                    self.FILL_TIMEOUT_SECONDS,
+                    self.FILL_POLL_INTERVAL_SECONDS,
+                )
+            )
+
+            if filled_order is None:
+
+                self.trades_rejected += 1
+
+                self.log(
+                    agent="Alpaca",
+                    action=(
+                        "SELL order did not resolve "
+                        "within timeout"
+                    ),
+                    symbol=symbol,
+                    status="warning",
+                    details={
+                        "order_id": str(
+                            order.id
+                        ),
+                    },
+                )
+
+                return False
+
+            status = str(
+                filled_order.status
+            ).lower()
+
+            # ====================================================
+            # SELL REJECTED / CANCELLED
+            # ====================================================
+
+            if status != "filled":
+
+                self.trades_rejected += 1
+
+                self.log(
+                    agent="Alpaca",
+                    action=(
+                        "SELL order did not fill"
+                    ),
+                    symbol=symbol,
+                    status="warning",
+                    details={
+                        "order_id": str(
+                            order.id
+                        ),
+                        "status": status,
+                    },
+                )
+
+                # ------------------------------------------------
+                # Re-establish protection because the position
+                # may still exist after the failed exit.
+                # ------------------------------------------------
+
+                remaining_position = (
+                    await asyncio.to_thread(
+                        alpaca_service.get_position,
+                        symbol,
+                    )
+                )
+
+                if remaining_position is not None:
+
+                    remaining_qty = float(
+                        remaining_position.qty
+                    )
+
+                    if remaining_qty > 0:
+
+                        entry_price = float(
+                            remaining_position.avg_entry_price
+                        )
+
+                        await self._ensure_position_protection(
+                            symbol=symbol,
+                            quantity=remaining_qty,
+                            entry_price=entry_price,
+                        )
+
+                return False
+
+            # ====================================================
+            # 6. ACTUAL FILL
+            # ====================================================
+
+            try:
+
+                filled_qty = float(
+                    filled_order.filled_qty
+                )
+
+            except (
+                AttributeError,
+                TypeError,
+                ValueError,
+            ):
+
+                filled_qty = sell_quantity
+
+            try:
+
+                filled_avg_price = float(
+                    filled_order.filled_avg_price
+                )
+
+            except (
+                AttributeError,
+                TypeError,
+                ValueError,
+            ):
+
+                filled_avg_price = (
+                    estimated_price
+                )
+
+            # ====================================================
+            # 7. VERIFY REMAINING POSITION
+            # ====================================================
+
+            await asyncio.sleep(
+                0.5
+            )
+
+            remaining_position = (
+                await asyncio.to_thread(
+                    alpaca_service.get_position,
+                    symbol,
+                )
+            )
+
+            if remaining_position is None:
+
+                remaining_qty = 0.0
+
+            else:
+
+                remaining_qty = float(
+                    remaining_position.qty
+                )
+
+            # ====================================================
+            # 8. RESTORE PROTECTION IF PARTIAL EXIT
+            # ====================================================
+
+            if remaining_qty > 0:
+
+                remaining_entry = float(
+                    remaining_position.avg_entry_price
+                )
+
+                self.log(
+                    agent="Risk Agent",
+                    action=(
+                        "Partial SELL detected — "
+                        "restoring protection"
+                    ),
+                    symbol=symbol,
+                    status="warning",
+                    details={
+                        "remaining_quantity": remaining_qty,
+                    },
+                )
+
+                stop_order = (
+                    await self._ensure_position_protection(
+                        symbol=symbol,
+                        quantity=remaining_qty,
+                        entry_price=remaining_entry,
+                    )
+                )
+
+                if stop_order is not None:
+
+                    self.protected_symbols.add(
+                        symbol
+                    )
+
+            else:
+
+                self.protected_symbols.discard(
+                    symbol
+                )
+
+                self.breakeven_symbols.discard(
+                    symbol
+                )
+
+            # ====================================================
+            # 9. COUNT COMPLETED TRADE
+            # ====================================================
 
             self.trades_executed += 1
 
@@ -2298,12 +2811,29 @@ class AutonomousTradingAgent:
                 ).isoformat()
             )
 
-            self.breakeven_symbols.discard(
-                symbol
-            )
-
-            self.protected_symbols.discard(
-                symbol
+            self.log(
+                agent="Alpaca",
+                action=(
+                    "SELL order filled"
+                ),
+                symbol=symbol,
+                status="success",
+                details={
+                    "order_id": str(
+                        filled_order.id
+                    ),
+                    "requested_quantity": (
+                        sell_quantity
+                    ),
+                    "filled_quantity": filled_qty,
+                    "filled_average_price": (
+                        filled_avg_price
+                    ),
+                    "remaining_quantity": (
+                        remaining_qty
+                    ),
+                    "reason": reason,
+                },
             )
 
             self.log(
@@ -2315,9 +2845,12 @@ class AutonomousTradingAgent:
                 status="success",
                 details={
                     "order_id": str(
-                        order.id
+                        filled_order.id
                     ),
-                    "quantity": quantity,
+                    "quantity_sold": filled_qty,
+                    "fill_price": filled_avg_price,
+                    "remaining_quantity": remaining_qty,
+                    "reason": reason,
                 },
             )
 
@@ -2339,7 +2872,75 @@ class AutonomousTradingAgent:
                 details=str(error),
             )
 
+            # ====================================================
+            # IMPORTANT RECOVERY
+            #
+            # If anything failed after the stop was cancelled,
+            # check whether the position still exists and restore
+            # protection.
+            # ====================================================
+
+            try:
+
+                remaining_position = (
+                    await asyncio.to_thread(
+                        alpaca_service.get_position,
+                        symbol,
+                    )
+                )
+
+                if remaining_position is not None:
+
+                    remaining_qty = float(
+                        remaining_position.qty
+                    )
+
+                    if remaining_qty > 0:
+
+                        entry_price = float(
+                            remaining_position.avg_entry_price
+                        )
+
+                        await self._ensure_position_protection(
+                            symbol=symbol,
+                            quantity=remaining_qty,
+                            entry_price=entry_price,
+                        )
+
+            except Exception as recovery_error:
+
+                self.last_error = (
+                    f"{error} | "
+                    f"Protection recovery failed: "
+                    f"{recovery_error}"
+                )
+
+                self.log(
+                    agent="Risk Agent",
+                    action=(
+                        "CRITICAL — failed to restore "
+                        "protection after SELL error"
+                    ),
+                    symbol=symbol,
+                    status="error",
+                    details=str(
+                        recovery_error
+                    ),
+                )
+
             return False
+
+        finally:
+
+            self.exit_in_progress.discard(
+                symbol
+            )
+
+            if self.running:
+
+                self.current_stage = (
+                    "WAITING"
+                )
 
     # ============================================================
     # STATUS
@@ -2422,12 +3023,20 @@ class AutonomousTradingAgent:
                 self.FILL_TIMEOUT_SECONDS
             ),
 
+            "cancel_timeout_seconds": (
+                self.CANCEL_TIMEOUT_SECONDS
+            ),
+
             "protected_symbols": list(
                 self.protected_symbols
             ),
 
             "breakeven_symbols": list(
                 self.breakeven_symbols
+            ),
+
+            "exit_in_progress": list(
+                self.exit_in_progress
             ),
 
             "last_error": self.last_error,
@@ -2461,3 +3070,4 @@ class AutonomousTradingAgent:
 autonomous_agent = (
     AutonomousTradingAgent()
 )
+
