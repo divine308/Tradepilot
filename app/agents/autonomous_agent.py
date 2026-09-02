@@ -44,6 +44,9 @@ class AutonomousTradingAgent:
     # Maximum value of a NEW position
     MAX_TRADE_PERCENT = 0.05
 
+    # Maximum combined portfolio exposure
+    MAX_TOTAL_EXPOSURE_PERCENT = 0.50
+
     # ------------------------------------------------------------
     # Position protection
     # ------------------------------------------------------------
@@ -56,7 +59,9 @@ class AutonomousTradingAgent:
     # ------------------------------------------------------------
 
     BREAKEVEN_TRIGGER_PERCENT = 0.10
-    BREAKEVEN_OFFSET_PERCENT = 0.0005
+
+    # Lock +0.5% above entry
+    BREAKEVEN_OFFSET_PERCENT = 0.005
 
     # ------------------------------------------------------------
     # Execution limits
@@ -116,13 +121,10 @@ class AutonomousTradingAgent:
         # Local protection state
         # --------------------------------------------------------
 
-        # Symbols whose stop has already been moved to breakeven
         self.breakeven_symbols = set()
 
-        # Symbols for which the agent has established protection
         self.protected_symbols = set()
 
-        # Symbols currently being exited
         self.exit_in_progress = set()
 
     # ============================================================
@@ -451,6 +453,48 @@ class AutonomousTradingAgent:
                 )
 
     # ============================================================
+    # CALCULATE TOTAL PORTFOLIO EXPOSURE
+    # ============================================================
+
+    def _calculate_total_exposure(
+        self,
+        positions,
+        equity: float,
+    ):
+
+        if equity <= 0:
+            return 0.0
+
+        total_market_value = 0.0
+
+        for position in positions:
+
+            try:
+
+                market_value = float(
+                    position.market_value
+                )
+
+                if market_value > 0:
+
+                    total_market_value += (
+                        market_value
+                    )
+
+            except (
+                AttributeError,
+                TypeError,
+                ValueError,
+            ):
+
+                continue
+
+        return (
+            total_market_value /
+            equity
+        )
+
+    # ============================================================
     # POSITION PROTECTION
     # ============================================================
 
@@ -506,6 +550,7 @@ class AutonomousTradingAgent:
                     )
 
                 except (
+                    AttributeError,
                     TypeError,
                     ValueError,
                 ):
@@ -530,13 +575,113 @@ class AutonomousTradingAgent:
                 if position_qty <= 0:
                     continue
 
-                # ------------------------------------------------
-                # Only long positions for now
-                # ------------------------------------------------
+                # =================================================
+                # PROTECTION RECOVERY
+                #
+                # If the agent restarted and forgot local state,
+                # make sure the existing position still has a
+                # protective stop.
+                # =================================================
 
-                if current_price <= entry_price:
+                if (
+                    symbol
+                    not in self.protected_symbols
+                ):
 
-                    continue
+                    self.current_stage = (
+                        "RECOVERING_PROTECTION"
+                    )
+
+                    self.log(
+                        agent="Risk Agent",
+                        action=(
+                            "Checking protection "
+                            "for existing position"
+                        ),
+                        symbol=symbol,
+                    )
+
+                    try:
+
+                        stop_order = (
+                            await asyncio.to_thread(
+                                alpaca_service
+                                .submit_protective_stop,
+                                symbol,
+                                round(
+                                    position_qty,
+                                    9,
+                                ),
+                                round(
+                                    entry_price
+                                    * (
+                                        1
+                                        - self.STOP_LOSS_PERCENT
+                                    ),
+                                    2,
+                                ),
+                            )
+                        )
+
+                        if stop_order is not None:
+
+                            self.protected_symbols.add(
+                                symbol
+                            )
+
+                            self.log(
+                                agent="Risk Agent",
+                                action=(
+                                    "Protective stop "
+                                    "recovered"
+                                ),
+                                symbol=symbol,
+                                status="success",
+                                details={
+                                    "order_id": str(
+                                        stop_order.id
+                                    ),
+                                    "stop_price": (
+                                        entry_price
+                                        * (
+                                            1
+                                            - self.STOP_LOSS_PERCENT
+                                        )
+                                    ),
+                                    "quantity": (
+                                        position_qty
+                                    ),
+                                },
+                            )
+
+                    except Exception as error:
+
+                        self.last_error = str(error)
+
+                        self.log(
+                            agent="Risk Agent",
+                            action=(
+                                "Protective stop "
+                                "recovery failed"
+                            ),
+                            symbol=symbol,
+                            status="error",
+                            details=str(error),
+                        )
+
+                        # Do not automatically sell here.
+                        #
+                        # The existing position may already have
+                        # an active Alpaca stop. We only know that
+                        # local state does not know about it.
+                        #
+                        # The normal protection establishment path
+                        # remains responsible for creating a stop
+                        # if required.
+
+                # =================================================
+                # PROFIT
+                # =================================================
 
                 profit_percent = (
                     (
@@ -563,9 +708,6 @@ class AutonomousTradingAgent:
                         profit_percent=profit_percent,
                     )
 
-                    # Do not continue managing
-                    # this position during the
-                    # same cycle.
                     continue
 
                 # =================================================
@@ -594,7 +736,7 @@ class AutonomousTradingAgent:
                 )
 
             # ----------------------------------------------------
-            # Clean local state for positions that no longer exist
+            # Clean local state
             # ----------------------------------------------------
 
             self.breakeven_symbols.intersection_update(
@@ -658,7 +800,10 @@ class AutonomousTradingAgent:
                 .move_stop_to_breakeven(
                     symbol=symbol,
                     stop_price=(
-                        breakeven_price
+                        round(
+                            breakeven_price,
+                            2,
+                        )
                     ),
                 )
             )
@@ -916,8 +1061,9 @@ class AutonomousTradingAgent:
                         quantity,
                         9,
                     ),
-                    stop_price=(
-                        stop_price
+                    stop_price=round(
+                        stop_price,
+                        2,
                     ),
                 )
             )
@@ -1073,8 +1219,7 @@ class AutonomousTradingAgent:
         for symbol in self.WATCHLIST:
 
             # ----------------------------------------------------
-            # Allow manual scans while agent is stopped.
-            # But stop background scan immediately if stopped.
+            # Background scan cancellation
             # ----------------------------------------------------
 
             if (
@@ -1175,7 +1320,14 @@ class AutonomousTradingAgent:
             risk_score = float(
                 strategy.get(
                     "risk_score",
-                    100,
+                    1.0,
+                )
+            )
+
+            quantitative_score = float(
+                strategy.get(
+                    "quantitative_score",
+                    50.0,
                 )
             )
 
@@ -1187,13 +1339,16 @@ class AutonomousTradingAgent:
             self.log(
                 agent="Strategy Agent",
                 action=(
-                    f"AI decision: {decision}"
+                    f"Strategy decision: {decision}"
                 ),
                 symbol=symbol,
                 details={
                     "decision": decision,
                     "confidence": confidence,
                     "risk_score": risk_score,
+                    "quantitative_score": (
+                        quantitative_score
+                    ),
                     "reasoning": reasoning,
                 },
             )
@@ -1211,7 +1366,7 @@ class AutonomousTradingAgent:
                 self.log(
                     agent="Strategy Agent",
                     action=(
-                        "Invalid AI decision — "
+                        "Invalid strategy decision — "
                         "trade skipped"
                     ),
                     symbol=symbol,
@@ -1229,7 +1384,7 @@ class AutonomousTradingAgent:
                 self.log(
                     agent="Strategy Agent",
                     action=(
-                        "No trade — AI recommends HOLD"
+                        "No trade — strategy recommends HOLD"
                     ),
                     symbol=symbol,
                     status="info",
@@ -1323,6 +1478,17 @@ class AutonomousTradingAgent:
                 continue
 
             # ====================================================
+            # TOTAL EXISTING EXPOSURE
+            # ====================================================
+
+            total_existing_exposure = (
+                self._calculate_total_exposure(
+                    positions=positions,
+                    equity=equity,
+                )
+            )
+
+            # ====================================================
             # PRICE
             # ====================================================
 
@@ -1367,17 +1533,7 @@ class AutonomousTradingAgent:
                 / price
             )
 
-            # ----------------------------------------------------
-            # IMPORTANT:
-            #
-            # Keep fractional quantity.
-            #
-            # Alpaca supports fractional quantities for
-            # supported DAY equity orders.
-            #
-            # Do NOT round this to an integer.
-            # ----------------------------------------------------
-
+            # Keep fractional quantity
             quantity = round(
                 quantity,
                 9,
@@ -1438,27 +1594,6 @@ class AutonomousTradingAgent:
                 continue
 
             # ====================================================
-            # EXISTING EXPOSURE
-            # ====================================================
-
-            existing_exposure = 0.0
-
-            if existing_position is not None:
-
-                existing_market_value = (
-                    abs(
-                        float(
-                            existing_position.market_value
-                        )
-                    )
-                )
-
-                existing_exposure = (
-                    existing_market_value
-                    / equity
-                )
-
-            # ====================================================
             # RISK
             # ====================================================
 
@@ -1476,9 +1611,12 @@ class AutonomousTradingAgent:
                     "trade_value": trade_value,
                     "confidence": confidence,
                     "risk_score": risk_score,
+                    "quantitative_score": (
+                        quantitative_score
+                    ),
                     "equity": equity,
                     "existing_exposure": (
-                        existing_exposure
+                        total_existing_exposure
                     ),
                     "quantity": quantity,
                 },
@@ -1490,7 +1628,7 @@ class AutonomousTradingAgent:
                 confidence=confidence,
                 risk_score=risk_score,
                 existing_exposure=(
-                    existing_exposure
+                    total_existing_exposure
                 ),
             )
 
@@ -1536,7 +1674,6 @@ class AutonomousTradingAgent:
             else:
 
                 stop_loss_price = None
-
                 take_profit_price = None
 
             # ====================================================
@@ -1577,9 +1714,7 @@ class AutonomousTradingAgent:
                 details={
                     "quantity": quantity,
                     "estimated_price": price,
-                    "estimated_value": (
-                        trade_value
-                    ),
+                    "estimated_value": trade_value,
                     "stop_loss": (
                         stop_loss_price
                     ),
@@ -1595,55 +1730,41 @@ class AutonomousTradingAgent:
                         if decision == "BUY"
                         else None
                     ),
+                    "breakeven_offset": (
+                        self.BREAKEVEN_OFFSET_PERCENT
+                    ),
+                    "existing_exposure": (
+                        total_existing_exposure
+                    ),
                 },
             )
 
             # ====================================================
             # BUY EXECUTION
-            #
-            # IMPORTANT:
-            #
-            # We intentionally DO NOT send SL/TP to
-            # submit_market_order().
-            #
-            # The entry is a SIMPLE fractional market order.
-            #
-            # After it fills:
-            #
-            #     entry
-            #       ↓
-            #     wait for fill
-            #       ↓
-            #     protective stop
-            #       ↓
-            #     monitor position
-            #       ↓
-            #     breakeven
-            #       ↓
-            #     take profit
-            #
-            # This avoids Alpaca's fractional + bracket
-            # rejection.
             # ====================================================
 
             if decision == "BUY":
 
-                await self._execute_buy(
-                    symbol=symbol,
-                    quantity=quantity,
-                    estimated_price=price,
-                    estimated_value=trade_value,
-                    stop_loss_price=(
-                        stop_loss_price
-                    ),
-                    take_profit_price=(
-                        take_profit_price
-                    ),
-                    confidence=confidence,
-                    risk_score=risk_score,
+                trade_result = (
+                    await self._execute_buy(
+                        symbol=symbol,
+                        quantity=quantity,
+                        estimated_price=price,
+                        estimated_value=trade_value,
+                        stop_loss_price=(
+                            stop_loss_price
+                        ),
+                        take_profit_price=(
+                            take_profit_price
+                        ),
+                        confidence=confidence,
+                        risk_score=risk_score,
+                    )
                 )
 
-                trades_this_scan += 1
+                if trade_result:
+
+                    trades_this_scan += 1
 
                 break
 
@@ -1653,16 +1774,20 @@ class AutonomousTradingAgent:
 
             if decision == "SELL":
 
-                await self._execute_sell(
-                    symbol=symbol,
-                    quantity=quantity,
-                    estimated_price=price,
-                    estimated_value=trade_value,
-                    confidence=confidence,
-                    risk_score=risk_score,
+                trade_result = (
+                    await self._execute_sell(
+                        symbol=symbol,
+                        quantity=quantity,
+                        estimated_price=price,
+                        estimated_value=trade_value,
+                        confidence=confidence,
+                        risk_score=risk_score,
+                    )
                 )
 
-                trades_this_scan += 1
+                if trade_result:
+
+                    trades_this_scan += 1
 
                 break
 
@@ -1713,10 +1838,12 @@ class AutonomousTradingAgent:
         risk_score: float,
     ):
 
+        order = None
+
         try:
 
             # ====================================================
-            # 1. SIMPLE MARKET ENTRY
+            # 1. MARKET ENTRY
             # ====================================================
 
             order = (
@@ -1788,7 +1915,7 @@ class AutonomousTradingAgent:
                     },
                 )
 
-                return
+                return False
 
             # ====================================================
             # 3. ACTUAL FILL DATA
@@ -1801,6 +1928,7 @@ class AutonomousTradingAgent:
                 )
 
             except (
+                AttributeError,
                 TypeError,
                 ValueError,
             ):
@@ -1814,6 +1942,7 @@ class AutonomousTradingAgent:
                 )
 
             except (
+                AttributeError,
                 TypeError,
                 ValueError,
             ):
@@ -1841,10 +1970,10 @@ class AutonomousTradingAgent:
                     },
                 )
 
-                return
+                return False
 
             # ====================================================
-            # 4. RECALCULATE PROTECTION FROM ACTUAL FILL
+            # 4. RECALCULATE PROTECTION
             # ====================================================
 
             actual_stop_price = (
@@ -1893,7 +2022,7 @@ class AutonomousTradingAgent:
             )
 
             # ====================================================
-            # 5. CREATE PROTECTIVE STOP
+            # 5. PROTECTIVE STOP
             # ====================================================
 
             self.current_stage = (
@@ -1981,10 +2110,22 @@ class AutonomousTradingAgent:
                     "take_profit": (
                         actual_take_profit
                     ),
+                    "breakeven_trigger": (
+                        filled_avg_price
+                        * (
+                            1
+                            + self.BREAKEVEN_TRIGGER_PERCENT
+                        )
+                    ),
+                    "breakeven_offset": (
+                        self.BREAKEVEN_OFFSET_PERCENT
+                    ),
                     "confidence": confidence,
                     "risk_score": risk_score,
                 },
             )
+
+            return True
 
         except Exception as error:
 
@@ -2002,15 +2143,9 @@ class AutonomousTradingAgent:
                 details=str(error),
             )
 
-            # ----------------------------------------------------
-            # CRITICAL:
-            #
-            # If the BUY filled but the protective stop failed,
-            # try to close the position.
-            #
-            # We first inspect the current position so that we
-            # don't blindly sell the originally requested qty.
-            # ----------------------------------------------------
+            # ====================================================
+            # CRITICAL RECOVERY
+            # ====================================================
 
             try:
 
@@ -2067,6 +2202,8 @@ class AutonomousTradingAgent:
                     ),
                 )
 
+            return False
+
     # ============================================================
     # SELL EXECUTION
     # ============================================================
@@ -2116,7 +2253,7 @@ class AutonomousTradingAgent:
                 )
 
             # ====================================================
-            # SIMPLE MARKET SELL
+            # MARKET SELL
             # ====================================================
 
             order = (
@@ -2184,6 +2321,8 @@ class AutonomousTradingAgent:
                 },
             )
 
+            return True
+
         except Exception as error:
 
             self.last_error = str(error)
@@ -2199,6 +2338,8 @@ class AutonomousTradingAgent:
                 status="error",
                 details=str(error),
             )
+
+            return False
 
     # ============================================================
     # STATUS
@@ -2247,6 +2388,10 @@ class AutonomousTradingAgent:
 
             "max_trade_percent": (
                 self.MAX_TRADE_PERCENT
+            ),
+
+            "max_total_exposure_percent": (
+                self.MAX_TOTAL_EXPOSURE_PERCENT
             ),
 
             "stop_loss_percent": (
