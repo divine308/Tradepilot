@@ -343,6 +343,7 @@ The backend then communicates with external services such as Alpaca and OpenAI.
 
 * Vercel
 * GitHub
+* Render
 
 ---
 
