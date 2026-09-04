@@ -2,13 +2,15 @@
 
 ## Autonomous AI Trading Agent
 
-TradePilot AI is an autonomous AI-powered trading platform designed to transform real-time market intelligence into disciplined, executable trading decisions.
+TradePilot AI is an autonomous AI-powered trading platform designed to turn real-time market data into disciplined, executable trading decisions.
 
 Instead of requiring a trader to manually monitor markets, interpret signals, determine risk, place orders, and manage positions, TradePilot brings these processes together through a multi-agent architecture.
 
 The system combines AI reasoning, market data, deterministic risk controls, and Alpaca's trading infrastructure to create an end-to-end autonomous trading workflow.
 
-### Core Pipeline
+---
+
+## Core Pipeline
 
 ```text
 Market Data
@@ -36,45 +38,45 @@ Continuous Monitoring
 
 ---
 
-## What TradePilot Does
+# What TradePilot Does
 
-TradePilot is designed to continuously move through the complete trading lifecycle:
+TradePilot is designed around an autonomous trading workflow that moves through the complete trading lifecycle:
 
 1. Observe market conditions
 2. Analyze available market data
 3. Identify potential opportunities
 4. Generate a trading decision
-5. Evaluate the proposed trade against risk rules
+5. Evaluate the proposed trade against predefined risk rules
 6. Execute approved trades through Alpaca
 7. Monitor open positions
 8. Apply position-management rules
 9. Continue monitoring for new opportunities
 
-The objective is to move beyond AI-powered market analysis and create an autonomous agent capable of reasoning, acting, and managing positions within predefined constraints.
+The goal is to move beyond AI-powered market analysis and build a system capable of reasoning, acting, and managing positions within clearly defined constraints.
 
 ---
 
 # Multi-Agent Architecture
 
-TradePilot uses specialized agents rather than relying on a single AI prompt to make every decision.
+TradePilot uses specialized agents rather than relying on a single AI prompt to handle the entire trading process.
 
 ## Market Agent
 
-The Market Agent is responsible for understanding current market conditions.
+The Market Agent is responsible for collecting and structuring market information for the rest of the system.
 
 Responsibilities include:
 
 * Retrieving market data
 * Processing price information
-* Identifying market conditions
-* Providing structured market context
-* Supplying information required by downstream agents
+* Identifying relevant market conditions
+* Building structured market context
+* Supplying information to downstream agents
 
 ---
 
 ## Strategy Agent
 
-The Strategy Agent interprets market information and generates a potential trading decision.
+The Strategy Agent interprets the available market context and generates a potential trading decision.
 
 Possible decisions include:
 
@@ -84,13 +86,13 @@ SELL
 HOLD
 ```
 
-The strategy layer can also consider potential entry conditions, stop-loss levels, take-profit levels, and other trade parameters.
+Depending on the strategy and market conditions, the strategy layer can also generate parameters such as potential entry levels, stop-loss levels, take-profit levels, and position sizing considerations.
 
 ---
 
 ## Risk Agent
 
-The Risk Agent acts as a deterministic safety layer between AI-generated decisions and trade execution.
+The Risk Agent provides a deterministic safety layer between AI-generated decisions and trade execution.
 
 TradePilot currently incorporates predefined controls including:
 
@@ -106,9 +108,7 @@ The purpose of this layer is to prevent an AI-generated decision from automatica
 
 ## Supervisor Agent
 
-The Supervisor coordinates the overall decision-making process.
-
-It helps ensure that:
+The Supervisor coordinates the major stages of the trading workflow.
 
 ```text
 Market Analysis
@@ -120,27 +120,43 @@ Risk Evaluation
 Execution Decision
 ```
 
-happens in the correct order.
-
-The Supervisor provides an additional coordination layer between the specialized agents and execution system.
+This coordination layer helps ensure that specialized agents operate in the intended sequence before a trade reaches the execution layer.
 
 ---
 
 ## Autonomous Agent
 
-The Autonomous Agent coordinates the continuous trading workflow.
+The Autonomous Agent coordinates the broader trading workflow.
 
-Rather than treating every request as an isolated AI interaction, TradePilot is designed around an ongoing observe → analyze → decide → execute → monitor cycle.
+Rather than treating every interaction as an isolated AI request, TradePilot is designed around an ongoing:
 
-This allows the system to operate as an autonomous trading workflow rather than simply functioning as a market-analysis chatbot.
+```text
+Observe
+   ↓
+Analyze
+   ↓
+Decide
+   ↓
+Validate
+   ↓
+Execute
+   ↓
+Monitor
+   ↓
+Repeat
+```
+
+cycle.
+
+This allows TradePilot to function as an autonomous trading workflow rather than simply as a market-analysis chatbot.
 
 ---
 
 # Risk-Aware Autonomous Execution
 
-One of the core principles behind TradePilot is that AI should not have unrestricted control over trading execution.
+A central principle of TradePilot is that AI should not have unrestricted authority over trading execution.
 
-The architecture separates AI reasoning from deterministic risk enforcement.
+AI reasoning and deterministic risk enforcement are separated within the architecture.
 
 ```text
 AI Decision
@@ -156,15 +172,19 @@ Reject   Execute
         Alpaca
 ```
 
-This means an AI-generated trading decision must satisfy predefined risk constraints before reaching the execution layer.
+An AI-generated trading decision must therefore satisfy predefined risk constraints before reaching the execution layer.
+
+This separation is designed to make autonomous execution more controlled and predictable.
 
 ---
 
 # Position Management
 
-Once a position is opened, TradePilot can apply automated position-management logic.
+TradePilot does not treat opening a position as the end of the workflow.
 
-Depending on the strategy and configuration, this can include:
+Once a position is opened, the system can apply automated position-management logic, depending on the strategy and configuration.
+
+This includes:
 
 * Stop-loss protection
 * Take-profit protection
@@ -173,7 +193,7 @@ Depending on the strategy and configuration, this can include:
 * Order-state monitoring
 * Exposure monitoring
 
-The goal is to ensure that TradePilot does not simply open positions and forget about them.
+The objective is to continuously monitor positions rather than simply generate an entry signal and stop there.
 
 ---
 
@@ -191,8 +211,6 @@ The integration provides access to:
 * Market data
 * Order execution
 * Position monitoring
-
-This allows TradePilot to connect AI decision-making directly to brokerage infrastructure.
 
 The overall architecture is:
 
@@ -214,7 +232,7 @@ Trading Account
 
 # AI Decision Architecture
 
-TradePilot is not designed around a simple prompt such as:
+TradePilot is not designed around a single prompt such as:
 
 > "Should I buy this stock?"
 
@@ -234,7 +252,7 @@ Risk Validation
 Execution
 ```
 
-This architecture separates market analysis, strategy generation, risk management, and execution into distinct responsibilities.
+This separates market analysis, strategy generation, risk management, coordination, and execution into distinct responsibilities.
 
 ---
 
@@ -276,7 +294,7 @@ Trading  Agents
 
 TradePilot provides a web-based trading interface built with React and Vite.
 
-The dashboard is designed to provide visibility into the autonomous trading system.
+The dashboard provides visibility into the trading system, account state, market information, positions, and AI-powered functionality.
 
 ### Frontend capabilities include:
 
@@ -294,7 +312,7 @@ The dashboard is designed to provide visibility into the autonomous trading syst
 
 ---
 
-# API
+# REST API
 
 TradePilot exposes REST endpoints through its FastAPI backend.
 
@@ -375,7 +393,11 @@ https://tradepilot-ai-dun.vercel.app/
 
 TradePilot AI was built for the lablab.ai Alpaca AI Trading Agents Hackathon.
 
-The project explores how autonomous AI agents can be connected to real trading infrastructure while maintaining deterministic risk controls.
+The project was submitted to the **Options Alpha Agents** event track.
+
+TradePilot's current implementation focuses on autonomous trading workflows, AI-driven market analysis, deterministic risk controls, Alpaca execution, and position management.
+
+The project explores how autonomous AI agents can interact with trading infrastructure while operating within predefined safety constraints.
 
 ### Submission
 
@@ -429,7 +451,7 @@ Repeat
 
 # Why TradePilot?
 
-TradePilot combines several capabilities that are often implemented separately:
+TradePilot combines capabilities that are often implemented separately:
 
 * AI market analysis
 * Multi-agent decision making
@@ -441,6 +463,25 @@ TradePilot combines several capabilities that are often implemented separately:
 * Brokerage integration
 
 The result is an architecture designed around autonomous, risk-aware trading rather than simply generating trading predictions.
+
+---
+
+# Performance & Validation
+
+TradePilot has been tested through paper-trading workflows during development and iteration.
+
+The system has been refined through testing of:
+
+* Trading strategies
+* Risk controls
+* Order execution
+* Position management
+* Market-data handling
+* Autonomous trading workflows
+
+Performance results from paper trading should not be interpreted as evidence of guaranteed future returns or live-market performance.
+
+Formal historical backtesting and independent validation remain areas for further development.
 
 ---
 
@@ -460,23 +501,16 @@ TradePilot AI was built by the TradePilot team.
 
 ### Contributors
 
-* Divine Okechukwu - Full Stack Dev, Al/Ml
-* Esther Olinya - Data Analyst
-* Peace SOSSA - Researcher
-* Jethro Ibebuike - AI Logic Engineer
+* **Divine Okechukwu** — Full Stack Developer, AI/ML
+* **Esther Olinya** — Data Analyst
+* **Peace SOSSA** — Researcher
+* **Jethro Ibebuike** — AI Logic Engineer
 
 ---
 
 # Built With
 
-React
-FastAPI
-OpenAI
-Alpaca
-SQLAlchemy
-Vite
-Vercel
-GitHub
+React · FastAPI · OpenAI · Alpaca · SQLAlchemy · Vite · Vercel · GitHub
 
 ---
 
